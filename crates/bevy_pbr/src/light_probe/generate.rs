@@ -12,7 +12,9 @@
 //! For prefiltered environment maps, see [`bevy_light::EnvironmentMapLight`].
 //! These components are intended to be added to a camera.
 use bevy_app::{App, Plugin, Update};
-use bevy_asset::{embedded_asset, load_embedded_asset, AssetServer, Assets, RenderAssetUsages};
+use bevy_asset::{
+    embedded_asset, load_embedded_asset, AssetId, AssetServer, Assets, RenderAssetUsages,
+};
 use bevy_core_pipeline::mip_generation::{
     self, DownsamplePass, DownsamplePipeline, DownsamplePipelineKey, DownsamplingConstants,
 };
@@ -36,8 +38,8 @@ use bevy_render::{
         ComputePipelineDescriptor, DownlevelFlags, Extent3d, FilterMode, MipmapFilterMode,
         PipelineCache, Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages, ShaderType,
         SpecializedComputePipelines, StorageTextureAccess, Texture, TextureAspect,
-        TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
-        TextureView, TextureViewDescriptor, TextureViewDimension, UniformBuffer,
+        TextureDescriptor, TextureDimension, TextureFormat, TextureId, TextureSampleType,
+        TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension, UniformBuffer,
     },
     renderer::{RenderAdapter, RenderContext, RenderDevice, RenderQueue},
     sync_component::{SyncComponent, SyncComponentPlugin},
@@ -65,6 +67,9 @@ use bevy_shader::ShaderDefVal;
 use core::cmp::min;
 use tracing::info;
 
+use super::refilter::{
+    rotate_rewritten, schedule_filtering, EnvironmentMapFilter, RewrittenEnvironmentMaps,
+};
 use crate::Bluenoise;
 
 /// Stores the bind group layouts for the environment map generation pipelines
@@ -138,6 +143,7 @@ impl Plugin for EnvironmentMapGenerationPlugin {
         };
 
         render_app
+            .init_resource::<RewrittenEnvironmentMaps>()
             .add_systems(
                 ExtractSchedule,
                 extract_generated_environment_map_entities.after(generate_environment_map_light),
@@ -149,6 +155,8 @@ impl Plugin for EnvironmentMapGenerationPlugin {
                         .in_set(RenderSystems::PrepareBindGroups),
                     prepare_generated_environment_map_intermediate_textures
                         .in_set(RenderSystems::PrepareResources),
+                    schedule_filtering.in_set(RenderSystems::PrepareResources),
+                    rotate_rewritten.in_set(RenderSystems::Cleanup),
                     (downsampling_system, filtering_system)
                         .chain()
                         .after(RenderSystems::PrepareBindGroups)
@@ -364,6 +372,7 @@ pub fn extract_generated_environment_map_entities(
         let specular_map = specular_map.unwrap();
 
         let render_filtered_env_map = RenderEnvironmentMap {
+            source: filtered_env_map.environment_map.id(),
             environment_map: env_map.clone(),
             diffuse_map: diffuse_map.clone(),
             specular_map: specular_map.clone(),
@@ -381,6 +390,8 @@ pub fn extract_generated_environment_map_entities(
 // A render-world specific version of FilteredEnvironmentMapLight that uses CachedTexture
 #[derive(Component, Clone)]
 pub struct RenderEnvironmentMap {
+    /// Source asset, for rewrite marks.
+    pub source: AssetId<Image>,
     pub environment_map: GpuImage,
     pub diffuse_map: GpuImage,
     pub specular_map: GpuImage,
@@ -452,6 +463,8 @@ pub struct FilteringConstants {
 /// Stores bind groups for the environment map generation pipelines
 #[derive(Component)]
 pub struct GeneratorBindGroups {
+    /// Textures bound, to rebuild only on replacement.
+    pub sources: [TextureId; 5],
     pub downsampling_first: BindGroup,
     pub downsampling_second: BindGroup,
     pub radiance: Vec<BindGroup>, // One per mip level
@@ -461,7 +474,12 @@ pub struct GeneratorBindGroups {
 
 /// Prepares bind groups for environment map generation pipelines
 pub fn prepare_generated_environment_map_bind_groups(
-    light_probes: Query<(Entity, &IntermediateTextures, &RenderEnvironmentMap)>,
+    light_probes: Query<(
+        Entity,
+        &IntermediateTextures,
+        &RenderEnvironmentMap,
+        Option<&GeneratorBindGroups>,
+    )>,
     render_device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
     queue: Res<RenderQueue>,
@@ -489,7 +507,17 @@ pub fn prepare_generated_environment_map_bind_groups(
         stbn_texture.texture_descriptor.size.height.trailing_zeros(),
     );
 
-    for (entity, textures, env_map_light) in &light_probes {
+    for (entity, textures, env_map_light, built) in &light_probes {
+        let sources = [
+            env_map_light.environment_map.texture.id(),
+            env_map_light.specular_map.texture.id(),
+            env_map_light.diffuse_map.texture.id(),
+            textures.environment_map.texture.id(),
+            stbn_texture.texture.id(),
+        ];
+        if built.is_some_and(|built| built.sources == sources) {
+            continue;
+        }
         // Determine mip chain based on input size
         let base_size = env_map_light.environment_map.texture_descriptor.size.width;
         let mip_count = compute_mip_count(base_size);
@@ -698,6 +726,7 @@ pub fn prepare_generated_environment_map_bind_groups(
         );
 
         commands.entity(entity).insert(GeneratorBindGroups {
+            sources,
             downsampling_first: downsampling_first_bind_group,
             downsampling_second: downsampling_second_bind_group,
             radiance: radiance_bind_groups,
@@ -744,7 +773,11 @@ fn create_placeholder_storage_view(render_device: &RenderDevice) -> TextureView 
 }
 
 pub fn downsampling_system(
-    query: Query<(&GeneratorBindGroups, &RenderEnvironmentMap)>,
+    query: Query<(
+        &GeneratorBindGroups,
+        &RenderEnvironmentMap,
+        &EnvironmentMapFilter,
+    )>,
     pipeline_cache: Res<PipelineCache>,
     pipelines: Option<Res<GeneratorPipelines>>,
     mut ctx: RenderContext,
@@ -772,7 +805,7 @@ pub fn downsampling_system(
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
 
-    for (bind_groups, env_map_light) in &query {
+    for (bind_groups, env_map_light, _) in query.iter().filter(|(_, _, filter)| filter.due) {
         // Copy base mip using compute shader with pre-built bind group
         {
             let mut compute_pass =
@@ -844,7 +877,11 @@ pub fn downsampling_system(
 }
 
 pub fn filtering_system(
-    query: Query<(&GeneratorBindGroups, &RenderEnvironmentMap)>,
+    query: Query<(
+        &GeneratorBindGroups,
+        &RenderEnvironmentMap,
+        &EnvironmentMapFilter,
+    )>,
     pipeline_cache: Res<PipelineCache>,
     pipelines: Option<Res<GeneratorPipelines>>,
     mut ctx: RenderContext,
@@ -864,7 +901,7 @@ pub fn filtering_system(
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
 
-    for (bind_groups, env_map_light) in &query {
+    for (bind_groups, env_map_light, _) in query.iter().filter(|(_, _, filter)| filter.due) {
         // Radiance convolution pass
         {
             let mut compute_pass =

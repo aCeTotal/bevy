@@ -190,6 +190,134 @@ pub struct Cascade {
     pub clip_from_world: Mat4,
     /// Size of each shadow map texel in world units.
     pub texel_size: f32,
+    /// Frames since its still casters were drawn.
+    pub age: u32,
+    /// Kept across frames, drawn over its whole area.
+    pub cached: bool,
+    /// Kept, with moving casters redrawn this frame.
+    pub due: bool,
+    /// Next box, drawn a tile per frame.
+    pub rebuild: Option<Rebuild>,
+}
+
+/// A kept cascade's next box.
+#[derive(Clone, Debug, Default, Reflect)]
+#[reflect(Clone, Default)]
+pub struct Rebuild {
+    /// Light to world.
+    pub world_from_cascade: Mat4,
+    /// Box projection.
+    pub clip_from_cascade: Mat4,
+    /// World to box clip.
+    pub clip_from_world: Mat4,
+    /// Tile drawn this frame.
+    pub tile: u32,
+}
+
+/// Tiles per side of a rebuild.
+pub const REBUILD_TILES: u32 = 2;
+
+/// Coverage share that starts a rebuild.
+const REBUILD_AHEAD: f32 = 0.9;
+
+/// Far cascades kept between redraws.
+#[derive(Component, Clone, Copy, Debug, Reflect)]
+#[reflect(Component, Clone, Debug)]
+pub struct CachedCascades {
+    /// First kept cascade.
+    pub first: usize,
+    /// Frames between moving caster redraws.
+    pub period: u32,
+    /// Frames between still refreshes.
+    pub refresh: u32,
+    /// Kept size over the view's need.
+    pub slack: f32,
+}
+
+/// Filter margin around the view, texels.
+const KEPT_MARGIN_TEXELS: f32 = 8.0;
+
+impl Cascade {
+    /// Same light turn and texel size.
+    fn matches(&self, fresh: &Cascade) -> bool {
+        self.world_from_cascade.x_axis == fresh.world_from_cascade.x_axis
+            && self.world_from_cascade.y_axis == fresh.world_from_cascade.y_axis
+            && self.texel_size == fresh.texel_size
+    }
+
+    /// Whether `corners` lie within `edge` of its box.
+    fn covers(&self, corners: &[Vec3A; 8], edge: f32) -> bool {
+        corners.iter().all(|corner| {
+            let clip = self.clip_from_world * corner.extend(1.0);
+            clip.x.abs() <= edge && clip.y.abs() <= edge && (0.0..=1.0).contains(&clip.z)
+        })
+    }
+
+    /// Its finished rebuild, taking over.
+    fn rebuilt(&self) -> Option<Cascade> {
+        let r = self.rebuild.as_ref()?;
+        Some(Cascade {
+            world_from_cascade: r.world_from_cascade,
+            clip_from_cascade: r.clip_from_cascade,
+            clip_from_world: r.clip_from_world,
+            age: 1,
+            due: true,
+            rebuild: None,
+            ..self.clone()
+        })
+    }
+
+    /// Its next frame, kept.
+    fn kept(&self, fresh: &Cascade, corners: &[Vec3A; 8], turn: &Turn) -> Option<Cascade> {
+        let next = |rebuild, due| Cascade {
+            age: self.age + 1,
+            due,
+            rebuild,
+            ..self.clone()
+        };
+        match &self.rebuild {
+            Some(r) if r.tile + 1 >= REBUILD_TILES * REBUILD_TILES => {
+                self.rebuilt().filter(|c| c.covers(corners, turn.edge))
+            }
+            Some(r) => Some(next(
+                Some(Rebuild {
+                    tile: r.tile + 1,
+                    ..r.clone()
+                }),
+                false,
+            )),
+            None if turn.idle
+                && (self.age >= turn.refresh
+                    || !self.covers(corners, turn.edge * REBUILD_AHEAD)) =>
+            {
+                Some(next(Some(Rebuild::of(fresh)), false))
+            }
+            None => Some(next(None, turn.due)),
+        }
+    }
+}
+
+/// What a kept cascade may do this frame.
+struct Turn {
+    /// Coverage edge, clip units.
+    edge: f32,
+    /// Moving casters redraw.
+    due: bool,
+    /// No other rebuild running.
+    idle: bool,
+    /// Frames between still refreshes.
+    refresh: u32,
+}
+
+impl Rebuild {
+    fn of(fresh: &Cascade) -> Rebuild {
+        Rebuild {
+            world_from_cascade: fresh.world_from_cascade,
+            clip_from_cascade: fresh.clip_from_cascade,
+            clip_from_world: fresh.clip_from_world,
+            tile: 0,
+        }
+    }
 }
 
 /// Sets up [`Cascades`] for all shadow mapped [`DirectionalLight`]s.
@@ -201,8 +329,11 @@ pub fn build_directional_light_cascades(
         &DirectionalLight,
         &CascadeShadowConfig,
         &mut Cascades,
+        Option<&CachedCascades>,
     )>,
+    mut frame: Local<u32>,
 ) {
+    *frame = frame.wrapping_add(1);
     let views = views
         .iter()
         .filter_map(|(entity, transform, projection, camera)| {
@@ -214,11 +345,14 @@ pub fn build_directional_light_cascades(
         })
         .collect::<Vec<_>>();
 
-    for (transform, directional_light, cascades_config, mut cascades) in &mut lights {
+    let size = directional_light_shadow_map.size as f32;
+    let edge = 1.0 - 2.0 * KEPT_MARGIN_TEXELS / size;
+    for (transform, directional_light, cascades_config, mut cascades, cached) in &mut lights {
         if !directional_light.shadow_maps_enabled {
+            cascades.cascades.clear();
             continue;
         }
-        cascades.cascades.clear();
+        let previous = core::mem::take(&mut cascades.cascades);
 
         // It is very important to the numerical and thus visual stability of shadows that
         // `world_from_light` has orthogonal upper-left 3x3 and zero translation.
@@ -237,17 +371,53 @@ pub fn build_directional_light_cascades(
             let near_bounds = [cascades_config.minimum_distance]
                 .into_iter()
                 .chain(far_bounds.clone().map(|bound| overlap_factor * bound));
+            let kept = previous.get(&view_entity);
+            // One cascade rebuilds at a time.
+            let mut rebuilding = kept.is_some_and(|k| k.iter().any(|c| c.rebuild.is_some()));
             let view_cascades = near_bounds
                 .zip(far_bounds)
-                .map(|(near_bound, far_bound)| {
+                .enumerate()
+                .map(|(index, (near_bound, far_bound))| {
                     // Negate bounds as -z is camera forward direction.
                     let corners = projection.get_frustum_corners(-near_bound, -far_bound);
-                    calculate_cascade(
+                    let Some(policy) = cached.filter(|c| index >= c.first) else {
+                        return calculate_cascade(
+                            corners,
+                            size,
+                            world_from_light,
+                            light_view_from_camera,
+                            1.0,
+                        );
+                    };
+                    let fresh = calculate_cascade(
                         corners,
-                        directional_light_shadow_map.size as f32,
+                        size,
                         world_from_light,
                         light_view_from_camera,
-                    )
+                        policy.slack,
+                    );
+                    let fresh = Cascade {
+                        cached: true,
+                        ..fresh
+                    };
+                    let world = corners.map(|c| world_from_view.transform_point3a(c));
+                    // Kept cascades take turns redrawing moving casters.
+                    let kept_count = (cascades_config.bounds.len() - policy.first) as u32;
+                    let turn = (index - policy.first) as u32 * policy.period / kept_count.max(1);
+                    let due = (*frame + turn).is_multiple_of(policy.period.max(1));
+                    let turn = Turn {
+                        edge,
+                        due,
+                        idle: !rebuilding,
+                        refresh: policy.refresh,
+                    };
+                    let next = kept
+                        .and_then(|k| k.get(index))
+                        .filter(|k| k.matches(&fresh) && k.covers(&world, edge))
+                        .and_then(|k| k.kept(&fresh, &world, &turn))
+                        .unwrap_or(fresh);
+                    rebuilding |= next.rebuild.is_some();
+                    next
                 })
                 .collect();
             cascades.cascades.insert(view_entity, view_cascades);
@@ -266,6 +436,7 @@ fn calculate_cascade(
     cascade_texture_size: f32,
     world_from_light: Mat4,
     light_from_camera: Mat4,
+    slack: f32,
 ) -> Cascade {
     let mut min = Vec3A::splat(f32::MAX);
     let mut max = Vec3A::splat(f32::MIN);
@@ -284,7 +455,11 @@ fn calculate_cascade(
     // NOTE: The size remains the same unless the view frustum or cascade configuration is modified.
     let body_diagonal = (frustum_corners[0] - frustum_corners[6]).length_squared();
     let far_plane_diagonal = (frustum_corners[4] - frustum_corners[6]).length_squared();
-    let cascade_diameter = body_diagonal.max(far_plane_diagonal).sqrt().ceil();
+    let cascade_diameter = (body_diagonal.max(far_plane_diagonal).sqrt() * slack).ceil();
+    // Depth room for a kept cascade to follow the view.
+    let depth_pad = (slack - 1.0) * 2.0 * cascade_diameter;
+    max.z += depth_pad;
+    min.z -= depth_pad;
 
     // NOTE: If we ensure that cascade_texture_size is a power of 2, then as we made cascade_diameter an
     //       integer, cascade_texel_size is then an integer multiple of a power of 2 and can be
@@ -332,5 +507,9 @@ fn calculate_cascade(
         clip_from_cascade,
         clip_from_world,
         texel_size: cascade_texel_size,
+        age: 0,
+        cached: false,
+        due: false,
+        rebuild: None,
     }
 }

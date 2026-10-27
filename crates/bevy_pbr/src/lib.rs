@@ -411,6 +411,10 @@ impl Plugin for PbrPlugin {
         render_app.add_systems(
             Core3d,
             (
+                restore_kept_shadows
+                    .after(StillShadowSystems)
+                    .before(per_view_shadow_pass::<EARLY_SHADOW_PASS>)
+                    .before(shared_shadow_pass::<EARLY_SHADOW_PASS>),
                 per_view_shadow_pass::<EARLY_SHADOW_PASS>
                     .after(early_prepass_build_indirect_parameters)
                     .before(early_downsample_depth)

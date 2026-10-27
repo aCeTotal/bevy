@@ -96,6 +96,12 @@ pub use bevy_shader as shader;
 pub use bevy_shape as shape;
 #[cfg(feature = "bevy_solari")]
 pub use bevy_solari as solari;
+#[cfg(feature = "bevy_probe_gi")]
+pub use bevy_probe_gi as probe_gi;
+#[cfg(feature = "bevy_ocean")]
+pub use bevy_ocean as ocean;
+#[cfg(feature = "bevy_virtual_geometry")]
+pub use bevy_virtual_geometry as virtual_geometry;
 #[cfg(feature = "bevy_sprite")]
 pub use bevy_sprite as sprite;
 #[cfg(feature = "bevy_sprite_render")]

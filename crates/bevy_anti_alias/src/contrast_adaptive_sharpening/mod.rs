@@ -1,14 +1,19 @@
-use crate::{fxaa::fxaa, smaa::smaa};
+use crate::{
+    fxaa::{fxaa, Fxaa},
+    smaa::{smaa, Smaa},
+};
 use bevy_app::prelude::*;
 use bevy_asset::{embedded_asset, load_embedded_asset, AssetServer};
 use bevy_camera::Camera;
 use bevy_core_pipeline::{
     schedule::{Core2d, Core2dSystems, Core3d, Core3dSystems},
+    tonemapping::{prepare_view_tonemapping_pipelines, Tonemapping, TonemappingSharpening},
     FullscreenShader,
 };
 use bevy_ecs::{prelude::*, query::QueryItem};
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
+    camera::ExtractedCamera,
     extract_component::{ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin},
     render_resource::{
         binding_types::{sampler, texture_2d, uniform_buffer},
@@ -116,7 +121,13 @@ impl Plugin for CasPlugin {
         };
         render_app
             .add_systems(RenderStartup, init_cas_pipeline)
-            .add_systems(Render, prepare_cas_pipelines.in_set(RenderSystems::Prepare))
+            .add_systems(
+                Render,
+                (fold_into_tonemapping, prepare_cas_pipelines)
+                    .chain()
+                    .in_set(RenderSystems::Prepare)
+                    .before(prepare_view_tonemapping_pipelines),
+            )
             .add_systems(
                 Core3d,
                 cas.after(fxaa)
@@ -221,13 +232,57 @@ impl Specializer<RenderPipeline> for CasPipelineSpecializer {
     }
 }
 
+/// Lets tonemapping sharpen when nothing runs between the two.
+fn fold_into_tonemapping(
+    mut commands: Commands,
+    views: Query<(
+        Entity,
+        &CasUniform,
+        &DenoiseCas,
+        Option<&Tonemapping>,
+        &ExtractedCamera,
+        Option<&Fxaa>,
+        Has<Smaa>,
+    )>,
+    mut removed: RemovedComponents<CasUniform>,
+) {
+    for entity in removed.read() {
+        if let Ok(mut view) = commands.get_entity(entity) {
+            view.remove::<TonemappingSharpening>();
+        }
+    }
+    for (entity, uniform, denoise, tonemapping, camera, fxaa, smaa) in &views {
+        let tonemaps =
+            tonemapping.is_some_and(Tonemapping::is_enabled) && !camera.tonemap_in_shader;
+        let between = smaa || fxaa.is_some_and(|f| f.enabled);
+        let mut view = commands.entity(entity);
+        if !tonemaps || between {
+            view.remove::<TonemappingSharpening>();
+            continue;
+        }
+        let milli = (uniform.sharpness * 1000.0).round() as u16;
+        view.insert(TonemappingSharpening {
+            milli,
+            denoise: denoise.0,
+        })
+        .remove::<ViewCasPipeline>();
+    }
+}
+
 fn prepare_cas_pipelines(
     mut commands: Commands,
     pipeline_cache: Res<PipelineCache>,
     mut sharpening_pipeline: ResMut<CasPipeline>,
     cameras: Query<
         (Entity, &ExtractedView, &DenoiseCas),
-        Or<(Added<CasUniform>, Changed<DenoiseCas>)>,
+        (
+            Or<(
+                Added<CasUniform>,
+                Changed<DenoiseCas>,
+                Without<ViewCasPipeline>,
+            )>,
+            Without<TonemappingSharpening>,
+        ),
     >,
     mut removals: RemovedComponents<CasUniform>,
 ) -> Result<(), BevyError> {

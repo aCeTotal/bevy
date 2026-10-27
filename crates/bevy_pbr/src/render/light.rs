@@ -1033,7 +1033,7 @@ pub struct LightMeta {
     pub view_gpu_lights: DynamicUniformBuffer<GpuLights>,
 }
 
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 pub enum LightEntity {
     Directional {
         light_entity: Entity,
@@ -1075,11 +1075,13 @@ pub fn prepare_lights(
         mut max_rect_lights_warning_emitted,
         mut max_cascades_per_light_warning_emitted,
         mut live_shadow_mapping_lights,
+        mut kept_shadows,
     ): (
         Local<bool>,
         Local<bool>,
         Local<bool>,
         Local<HashSet<RetainedViewEntity>>,
+        Local<KeptDirectionalShadows>,
     ),
     (
         mut point_lights,
@@ -1439,8 +1441,9 @@ pub fn prepare_lights(
 
     // iterate the views once to find the maximum number of cascade shadowmaps we will need
     let mut num_directional_cascades_enabled = 0usize;
+    let mut kept_cascade_layers = 0usize;
     for (
-        _entity,
+        view_entity,
         _camera_main_entity,
         _extracted_view,
         _clusters,
@@ -1453,6 +1456,7 @@ pub fn prepare_lights(
         .filter_map(|sorted_camera| views.get(sorted_camera.entity).ok())
     {
         let mut num_directional_cascades_for_this_view = 0usize;
+        let mut kept_cascades_for_this_view = 0usize;
         let render_layers = maybe_layers.unwrap_or_default();
 
         for light_entity in directional_light_entities.iter() {
@@ -1463,12 +1467,19 @@ pub fn prepare_lights(
                     .bounds
                     .len()
                     .min(MAX_CASCADES_PER_LIGHT);
+                kept_cascades_for_this_view += light.cascades.get(&view_entity).map_or(0, |c| {
+                    c.iter()
+                        .take(MAX_CASCADES_PER_LIGHT)
+                        .filter(|c| c.cached)
+                        .count()
+                });
             }
         }
 
         num_directional_cascades_enabled = num_directional_cascades_enabled
             .max(num_directional_cascades_for_this_view)
             .min(max_texture_array_layers);
+        kept_cascade_layers = kept_cascade_layers.max(kept_cascades_for_this_view);
     }
 
     global_clusterable_object_meta
@@ -1542,22 +1553,37 @@ pub fn prepare_lights(
         (directional_light_shadow_map.size as u32)
             .min(render_device.limits().max_texture_dimension_2d)
     };
-    let directional_light_depth_texture = texture_cache.get(
+    // Kept across frames.
+    let shadow_layout = directional_light_entities
+        .iter()
+        .filter_map(|entity| {
+            let light = directional_lights.get(*entity).ok()?.2;
+            light
+                .shadow_maps_enabled
+                .then_some((*entity, light.cascade_shadow_config.bounds.len()))
+        })
+        .collect();
+    let (directional_light_depth_texture, redraw_kept_cascades) = kept_shadows.texture(
         &render_device,
-        TextureDescriptor {
+        &TextureDescriptor {
             size: Extent3d {
                 width: directional_shadow_map_size,
                 height: directional_shadow_map_size,
-                depth_or_array_layers: directional_and_spot_count.max(1) as u32,
+                depth_or_array_layers: (directional_and_spot_count + kept_cascade_layers).max(1)
+                    as u32,
             },
             mip_level_count: 1,
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: CORE_3D_SHADOW_MAP_FORMAT,
             label: Some("directional_light_shadow_map_texture"),
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+            usage: TextureUsages::RENDER_ATTACHMENT
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_SRC
+                | TextureUsages::COPY_DST,
             view_formats: &[],
         },
+        shadow_layout,
     );
 
     let directional_light_depth_texture_view =
@@ -1894,6 +1920,7 @@ pub fn prepare_lights(
         }
 
         let mut directional_depth_texture_array_index = 0u32;
+        let mut kept_layer_index = directional_and_spot_count as u32;
         for (light_index, light_entity) in directional_light_entities
             .iter()
             .filter(|light_entity| {
@@ -1942,19 +1969,24 @@ pub fn prepare_lights(
                 .zip(frusta)
                 .zip(&light.cascade_shadow_config.bounds);
 
+            // Drawn view, then still view.
+            let view_count = 2 * iter.len();
             let light_view_entities = light_view_entities.entry(entity).or_insert_with(|| {
-                (0..iter.len())
+                (0..view_count)
                     .map(|_| commands.spawn_empty().id())
                     .collect()
             });
-            if light_view_entities.len() != iter.len() {
+            if light_view_entities.len() != view_count {
                 let entities = mem::take(light_view_entities);
                 despawn_entities(&mut commands, entities);
-                light_view_entities.extend((0..iter.len()).map(|_| commands.spawn_empty().id()));
+                light_view_entities.extend((0..view_count).map(|_| commands.spawn_empty().id()));
             }
+            let (drawn_views, still_views) = light_view_entities.split_at(iter.len());
 
-            for (cascade_index, (((cascade, frustum), bound), view_light_entity)) in
-                iter.zip(light_view_entities.iter().copied()).enumerate()
+            for (cascade_index, ((((cascade, frustum), bound), view_light_entity), still_entity)) in
+                iter.zip(drawn_views.iter().copied())
+                    .zip(still_views.iter().copied())
+                    .enumerate()
             {
                 gpu_lights.directional_lights[light_index].cascades[cascade_index] =
                     GpuDirectionalCascade {
@@ -1963,7 +1995,11 @@ pub fn prepare_lights(
                         far_bound: *bound,
                     };
 
-                let depth_texture_view =
+                let kept_layer = cascade.cached.then(|| {
+                    kept_layer_index += 1;
+                    kept_layer_index - 1
+                });
+                let layer_view = |layer: u32| {
                     directional_light_depth_texture
                         .texture
                         .create_view(&TextureViewDescriptor {
@@ -1974,20 +2010,90 @@ pub fn prepare_lights(
                             aspect: TextureAspect::All,
                             base_mip_level: 0,
                             mip_level_count: None,
-                            base_array_layer: directional_depth_texture_array_index,
+                            base_array_layer: layer,
                             array_layer_count: Some(1u32),
-                        });
+                        })
+                };
+                let pass_name =
+                    format!("shadow_directional_light_{light_index}_cascade_{cascade_index}");
+                let cascade_light = LightEntity::Directional {
+                    light_entity: *light_entity,
+                    cascade_index,
+                };
 
-                // NOTE: For point and spotlights, we reuse the same depth attachment for all views.
-                // However, for directional lights, we want a new depth attachment for each view,
-                // so that the view is cleared for each view.
+                commands
+                    .entity(still_entity)
+                    .remove::<(ShadowView, StillCasters)>();
+                let still = kept_layer.zip(still_draw(cascade, redraw_kept_cascades));
+                if let Some((layer, (still_box, tile))) = still {
+                    let size = directional_light_shadow_map.size as u32;
+                    let (zoom, viewport) = tile_projection(tile, size);
+                    commands.entity(still_entity).insert((
+                        ShadowView {
+                            depth_attachment: DepthStencilViewAttachment::new(
+                                DepthStencilViews::DepthOnly {
+                                    depth_view: layer_view(layer),
+                                },
+                                tile.is_none_or(|t| t == 0).then_some(0.0),
+                                None,
+                            ),
+                            pass_name: format!("{pass_name}_still"),
+                        },
+                        ExtractedView {
+                            retained_view_entity: RetainedViewEntity::new(
+                                *light_main_entity,
+                                Some(camera_main_entity.into()),
+                                (MAX_CASCADES_PER_LIGHT + cascade_index) as u32,
+                            ),
+                            viewport,
+                            world_from_view: GlobalTransform::from(still_box.world_from_cascade),
+                            clip_from_view: zoom * still_box.clip_from_cascade,
+                            clip_from_world: Some(zoom * still_box.clip_from_world),
+                            target_format: CORE_3D_SHADOW_MAP_FORMAT,
+                            color_grading: Default::default(),
+                            invert_culling: false,
+                        },
+                        cascade_light,
+                        StillCasters,
+                    ));
+                }
+
+                // A kept cascade's layer still holds its earlier draw.
+                let redrawn = cascade.age == 0 || redraw_kept_cascades || cascade.due;
+                if kept_layer.is_some() && !redrawn {
+                    directional_depth_texture_array_index += 1;
+                    commands
+                        .entity(view_light_entity)
+                        .remove::<(ShadowView, KeptRestore)>();
+                    live_shadow_mapping_lights.insert(RetainedViewEntity::new(
+                        *light_main_entity,
+                        Some(camera_main_entity.into()),
+                        cascade_index as u32,
+                    ));
+                    continue;
+                }
+                // Mid-rebuild redraws draw whole.
+                let restore =
+                    kept_layer.filter(|_| !(redraw_kept_cascades && cascade.rebuild.is_some()));
+
+                let depth_texture_view = layer_view(directional_depth_texture_array_index);
+
+                // Kept layers restore, others clear.
                 let depth_attachment = DepthStencilViewAttachment::new(
                     DepthStencilViews::DepthOnly {
                         depth_view: depth_texture_view.clone(),
                     },
-                    Some(0.0),
+                    restore.is_none().then_some(0.0),
                     None,
                 );
+
+                match restore {
+                    Some(still) => commands.entity(view_light_entity).insert(KeptRestore {
+                        texture: directional_light_depth_texture.texture.clone(),
+                        layers: (still, directional_depth_texture_array_index),
+                    }),
+                    None => commands.entity(view_light_entity).remove::<KeptRestore>(),
+                };
 
                 directional_depth_texture_array_index += 1;
 
@@ -2008,9 +2114,7 @@ pub fn prepare_lights(
                 commands.entity(view_light_entity).insert((
                     ShadowView {
                         depth_attachment,
-                        pass_name: format!(
-                            "shadow_directional_light_{light_index}_cascade_{cascade_index}"
-                        ),
+                        pass_name,
                     },
                     ExtractedView {
                         retained_view_entity,
@@ -2028,10 +2132,7 @@ pub fn prepare_lights(
                         invert_culling: false,
                     },
                     frustum,
-                    LightEntity::Directional {
-                        light_entity: *light_entity,
-                        cascade_index,
-                    },
+                    cascade_light,
                     (*light_render_layers).clone(),
                 ));
 

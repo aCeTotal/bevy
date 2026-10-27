@@ -1,3 +1,4 @@
+use super::refresh::AtmosphereRefresh;
 use crate::{
     resources::{
         AtmosphereSampler, AtmosphereTextures, AtmosphereTransform, AtmosphereTransforms,
@@ -11,7 +12,7 @@ use bevy_ecs::{
     entity::Entity,
     lifecycle::{Insert, Remove},
     observer::On,
-    query::{Has, With, Without},
+    query::{Has, With},
     resource::Resource,
     system::{Commands, Query, Res, ResMut},
     template::FromTemplate,
@@ -143,7 +144,11 @@ pub(super) fn prepare_atmosphere_probe_bind_groups(
 
 pub(super) fn prepare_probe_textures(
     view_textures: Query<&AtmosphereTextures, With<ExtractedAtmosphere>>,
-    probes: Query<(Entity, &AtmosphereEnvironmentMap), Without<AtmosphereProbeTextures>>,
+    probes: Query<(
+        Entity,
+        &AtmosphereEnvironmentMap,
+        Option<&AtmosphereProbeTextures>,
+    )>,
     gpu_images: Res<RenderAssets<GpuImage>>,
     mut commands: Commands,
 ) {
@@ -152,7 +157,11 @@ pub(super) fn prepare_probe_textures(
         return;
     };
 
-    for (probe, render_env_map) in &probes {
+    for (probe, render_env_map, existing) in &probes {
+        let sky_view = view_textures.sky_view_lut.texture.id();
+        if existing.is_some_and(|t| t.sky_view_lut.texture.id() == sky_view) {
+            continue;
+        }
         let Some(environment) = gpu_images.get(&render_env_map.environment_map) else {
             continue;
         };
@@ -289,6 +298,7 @@ pub fn on_remove_atmosphere_environment_map_light(
 
 pub fn atmosphere_environment(
     view: ViewQuery<(
+        Option<&AtmosphereRefresh>,
         &DynamicUniformIndex<GpuAtmosphere>,
         &DynamicUniformIndex<GpuAtmosphereSettings>,
         &AtmosphereTransformsOffset,
@@ -306,12 +316,16 @@ pub fn atmosphere_environment(
     };
 
     let (
+        refresh,
         atmosphere_uniforms_offset,
         settings_uniforms_offset,
         atmosphere_transforms_offset,
         view_uniforms_offset,
         lights_uniforms_offset,
     ) = view.into_inner();
+    if refresh.is_some_and(|r| !r.sky) {
+        return;
+    }
 
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();

@@ -44,6 +44,7 @@ use crate::{
 pub mod environment_map;
 pub mod generate;
 pub mod irradiance_volume;
+pub mod refilter;
 
 /// The maximum number of each type of light probe that each view will consider.
 ///

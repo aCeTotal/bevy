@@ -699,6 +699,9 @@ fn apply_pbr_lighting(
     found_diffuse_indirect = true;
 }
 
+    // Volume coverage; environment fills rest.
+    var volume_cover = 0.0;
+
     @if(IRRADIANCE_VOLUME)
     // Irradiance volume light (indirect)
     if (!found_diffuse_indirect) {
@@ -707,8 +710,9 @@ fn apply_pbr_lighting(
             in.N,
             &clusterable_object_index_ranges,
         );
-        indirect_light += irradiance_volume_light * diffuse_color * diffuse_occlusion;
-        found_diffuse_indirect = true;
+        indirect_light += irradiance_volume_light.rgb * diffuse_color * diffuse_occlusion;
+        volume_cover = irradiance_volume_light.a;
+        found_diffuse_indirect = volume_cover >= 1.0;
     }
 
     // Environment map light (indirect)
@@ -738,7 +742,7 @@ fn apply_pbr_lighting(
         found_diffuse_indirect,
     );
 
-    indirect_light += environment_light.diffuse * diffuse_occlusion;
+    indirect_light += environment_light.diffuse * diffuse_occlusion * (1.0 - volume_cover);
     if (!use_ssr) {
         indirect_light += environment_light.specular * specular_occlusion;
     }

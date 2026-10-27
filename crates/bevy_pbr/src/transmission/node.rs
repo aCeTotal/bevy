@@ -66,11 +66,18 @@ pub fn main_transmissive_pass_3d(
         multiview_mask: None,
     };
 
+    let viewport =
+        Viewport::from_viewport_and_override(camera.viewport.as_ref(), resolution_override);
+
     if !transmissive_phase.items.is_empty() {
         let steps = transmission_settings.steps;
         if steps > 0 {
             let transmission =
                 transmission.expect("`ViewTransmissionTexture` should exist at this point");
+            // Only the rendered region needs copying.
+            let copied = viewport.as_ref().map_or(physical_target_size, |v| {
+                v.physical_position + v.physical_size
+            });
 
             // `transmissive_phase.items` are depth sorted, so we split them into N = `steps`
             // ranges, rendering them back-to-front in multiple steps, allowing multiple levels of transparency.
@@ -79,14 +86,14 @@ pub fn main_transmissive_pass_3d(
                 ctx.command_encoder().copy_texture_to_texture(
                     target.main_texture().as_image_copy(),
                     transmission.texture.as_image_copy(),
-                    physical_target_size.to_extents(),
+                    copied.to_extents(),
                 );
 
                 let mut render_pass = ctx.begin_tracked_render_pass(render_pass_descriptor.clone());
                 let pass_span =
                     diagnostics.pass_span(&mut render_pass, "main_transmissive_pass_3d");
 
-                if let Some(viewport) = camera.viewport.as_ref() {
+                if let Some(viewport) = viewport.as_ref() {
                     render_pass.set_camera_viewport(viewport);
                 }
 
@@ -102,10 +109,8 @@ pub fn main_transmissive_pass_3d(
             let mut render_pass = ctx.begin_tracked_render_pass(render_pass_descriptor);
             let pass_span = diagnostics.pass_span(&mut render_pass, "main_transmissive_pass_3d");
 
-            if let Some(viewport) =
-                Viewport::from_viewport_and_override(camera.viewport.as_ref(), resolution_override)
-            {
-                render_pass.set_camera_viewport(&viewport);
+            if let Some(viewport) = viewport.as_ref() {
+                render_pass.set_camera_viewport(viewport);
             }
 
             if let Err(err) = transmissive_phase.render(&mut render_pass, world, view_entity) {

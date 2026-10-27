@@ -47,6 +47,7 @@ pub struct TonemappingPlugin;
 impl Plugin for TonemappingPlugin {
     fn build(&self, app: &mut App) {
         load_shader_library!(app, "lut_bindings.wesl");
+        load_shader_library!(app, "rcas.wesl");
 
         embedded_asset!(app, "tonemapping_frag.wesl");
 
@@ -178,12 +179,22 @@ bitflags! {
     }
 }
 
+/// Sharpening folded into tonemapping.
+#[derive(Component, Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TonemappingSharpening {
+    /// Strength in thousandths.
+    pub milli: u16,
+    /// Spare noisy areas.
+    pub denoise: bool,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TonemappingPipelineKey {
     target_format: TextureFormat,
     deband_dither: DebandDither,
     tonemapping: Tonemapping,
     flags: TonemappingPipelineKeyFlags,
+    sharpening: Option<TonemappingSharpening>,
 }
 
 impl SpecializedRenderPipeline for TonemappingPipeline {
@@ -203,6 +214,17 @@ impl SpecializedRenderPipeline for TonemappingPipeline {
 
         if let DebandDither::Enabled = key.deband_dither {
             shader_defs.push("DEBAND_DITHER".into());
+        }
+
+        if let Some(sharpening) = key.sharpening {
+            shader_defs.push("SHARPEN".into());
+            shader_defs.push(ShaderDefVal::UInt(
+                "SHARPNESS_MILLI".into(),
+                u32::from(sharpening.milli),
+            ));
+            if sharpening.denoise {
+                shader_defs.push("RCAS_DENOISE".into());
+            }
         }
 
         // Define shader flags depending on the color grading options in use.
@@ -383,12 +405,21 @@ pub fn prepare_view_tonemapping_pipelines(
             Option<&DebandDither>,
             Option<&ViewTonemappingPipeline>,
             Option<&ExtractedCamera>,
+            Option<&TonemappingSharpening>,
         ),
         With<ViewTarget>,
     >,
 ) {
-    for (entity, view, resolved_space, tonemapping, dither, existing_pipeline, camera) in
-        view_targets.iter()
+    for (
+        entity,
+        view,
+        resolved_space,
+        tonemapping,
+        dither,
+        existing_pipeline,
+        camera,
+        sharpening,
+    ) in view_targets.iter()
     {
         let method = *tonemapping.unwrap_or(&Tonemapping::None);
 
@@ -412,6 +443,7 @@ pub fn prepare_view_tonemapping_pipelines(
             deband_dither: *dither.unwrap_or(&DebandDither::Disabled),
             tonemapping: method,
             flags,
+            sharpening: sharpening.copied(),
         };
         let pipeline = pipelines.specialize(&pipeline_cache, &upscaling_pipeline, key);
 

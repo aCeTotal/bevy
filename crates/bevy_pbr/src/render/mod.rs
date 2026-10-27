@@ -1,5 +1,6 @@
 mod fog;
 mod gpu_preprocess;
+mod kept_shadows;
 mod light;
 pub(crate) mod mesh;
 mod mesh_bindings;
@@ -9,6 +10,10 @@ pub(crate) mod skin;
 
 pub use fog::*;
 pub use gpu_preprocess::*;
+pub use kept_shadows::{
+    restore_kept_shadows, KeptDirectionalShadows, KeptRestore, StillCasters, StillShadowSystems,
+};
+pub(crate) use kept_shadows::{still_draw, tile_projection};
 pub use light::*;
 pub use mesh::*;
 pub use mesh_bindings::MeshLayouts;

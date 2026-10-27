@@ -343,6 +343,15 @@ bevy_bsn = ["bevy_internal/bevy_bsn"]
 # Provides raytraced lighting (experimental)
 bevy_solari = ["bevy_internal/bevy_solari"]
 
+# Clustered LOD geometry, GPU-culled and rasterized from a visibility buffer
+bevy_virtual_geometry = ["bevy_internal/bevy_virtual_geometry"]
+
+# Diffuse bounce light from ray-traced probe clipmaps
+bevy_probe_gi = ["bevy_internal/bevy_probe_gi"]
+
+# FFT ocean waves, refracting and mirroring water, and buoyancy
+bevy_ocean = ["bevy_internal/bevy_ocean"]
+
 # Provides sprite functionality
 bevy_sprite = ["bevy_internal/bevy_sprite"]
 

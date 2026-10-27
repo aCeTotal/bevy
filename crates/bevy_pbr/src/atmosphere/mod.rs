@@ -38,6 +38,7 @@
 
 mod environment;
 mod node;
+mod refresh;
 pub mod resources;
 
 use bevy_app::{App, Plugin};
@@ -85,6 +86,7 @@ use resources::{
 };
 use tracing::warn;
 
+use crate::main_transmissive_pass_3d;
 use crate::resources::prepare_atmosphere_buffers;
 
 use self::resources::{
@@ -160,6 +162,7 @@ impl Plugin for AtmospherePlugin {
 
         render_app
             .insert_resource(AtmosphereBindGroupLayouts::new())
+            .init_resource::<crate::light_probe::refilter::RewrittenEnvironmentMaps>()
             .init_gpu_resource::<RenderSkyBindGroupLayouts>()
             .init_gpu_resource::<AtmosphereSampler>()
             .init_gpu_resource::<AtmosphereLutPipelines>()
@@ -185,6 +188,9 @@ impl Plugin for AtmospherePlugin {
                     prepare_atmosphere_transforms.in_set(RenderSystems::PrepareResources),
                     prepare_atmosphere_bind_groups.in_set(RenderSystems::PrepareBindGroups),
                     prepare_atmosphere_buffers.in_set(RenderSystems::PrepareResources),
+                    refresh::refresh_atmosphere
+                        .in_set(RenderSystems::PrepareResources)
+                        .after(prepare_atmosphere_textures),
                 ),
             )
             .add_systems(
@@ -196,6 +202,7 @@ impl Plugin for AtmospherePlugin {
                         .before(Core3dSystems::MainPass),
                     render_sky
                         .after(main_opaque_pass_3d)
+                        .after(main_transmissive_pass_3d)
                         .before(main_transparent_pass_3d),
                 ),
             );

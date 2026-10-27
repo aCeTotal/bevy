@@ -190,11 +190,16 @@ impl ScatteringMedium {
 
     /// Returns a scattering medium representing an earth atmosphere.
     ///
-    /// Uses physically-based scale heights from Earth's atmosphere, assuming
-    /// a 60 km atmosphere height:
+    /// Coefficients from [Hillaire 2020] over the 100 km column of [`Atmosphere::earth`]:
     /// - Rayleigh (molecular) scattering: 8 km scale height
     /// - Mie (aerosol) scattering: 1.2 km scale height
+    /// - Ozone absorption: tent centred at 25 km, 30 km wide
+    ///
+    /// [Hillaire 2020]: https://sebh.github.io/publications/egsr2020.pdf
     pub fn earth(falloff_resolution: u32, phase_resolution: u32) -> Self {
+        const EARTH_ATMOSPHERE_HEIGHT: f32 = 100_000.0;
+        const RAYLEIGH_SCALE_HEIGHT: f32 = 8_000.0;
+        const MIE_SCALE_HEIGHT: f32 = 1_200.0;
         Self::new(
             falloff_resolution,
             phase_resolution,
@@ -203,14 +208,18 @@ impl ScatteringMedium {
                 ScatteringTerm {
                     absorption: Vec3::ZERO,
                     scattering: Vec3::new(5.802e-6, 13.558e-6, 33.100e-6),
-                    falloff: Falloff::Exponential { scale: 8.0 / 60.0 },
+                    falloff: Falloff::Exponential {
+                        scale: RAYLEIGH_SCALE_HEIGHT / EARTH_ATMOSPHERE_HEIGHT,
+                    },
                     phase: PhaseFunction::Rayleigh,
                 },
                 // Mie scattering Term
                 ScatteringTerm {
-                    absorption: Vec3::splat(3.996e-6),
-                    scattering: Vec3::splat(0.444e-6),
-                    falloff: Falloff::Exponential { scale: 1.2 / 60.0 },
+                    absorption: Vec3::splat(0.444e-6),
+                    scattering: Vec3::splat(3.996e-6),
+                    falloff: Falloff::Exponential {
+                        scale: MIE_SCALE_HEIGHT / EARTH_ATMOSPHERE_HEIGHT,
+                    },
                     phase: PhaseFunction::Mie { asymmetry: 0.8 },
                 },
                 // Ozone scattering Term

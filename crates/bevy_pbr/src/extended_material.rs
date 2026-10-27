@@ -46,6 +46,12 @@ pub trait MaterialExtension: Asset + AsBindGroup + Clone + Sized {
         None
     }
 
+    /// Reads the opaque scene, drawing in the transmissive pass.
+    #[inline]
+    fn reads_view_transmission_texture() -> bool {
+        false
+    }
+
     /// Controls if the prepass is enabled for the Material.
     /// For more information about what a prepass is, see the [`bevy_core_pipeline::prepass`] docs.
     #[inline]
@@ -255,7 +261,7 @@ impl<B: Material, E: MaterialExtension> Material for ExtendedMaterial<B, E> {
     }
 
     fn reads_view_transmission_texture(&self) -> bool {
-        B::reads_view_transmission_texture(&self.base)
+        E::reads_view_transmission_texture() || B::reads_view_transmission_texture(&self.base)
     }
 
     fn enable_prepass() -> bool {

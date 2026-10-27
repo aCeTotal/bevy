@@ -896,13 +896,18 @@ fn directional_light(
         Frc * derived_clearcoat_input.NdotL;
 @else   // STANDARD_MATERIAL_CLEARCOAT
     color = (diffuse + specular_light) * derived_input.NdotL;
+    return color * directional_light_radiance(light_id, (*input).P);
+}
 
+/// Light arriving at `P`: color, light texture and atmosphere.
+fn directional_light_radiance(light_id: u32, P: vec3<f32>) -> vec3<f32> {
+    let light = &view_bindings::lights.directional_lights[light_id];
     var texture_sample = 1f;
 
 @if(LIGHT_TEXTURES)
     if (*light).decal_index != 0xFFFFFFFFu {
         let local_position = (view_bindings::clustered_decals.decals[(*light).decal_index].local_from_world *
-            vec4((*input).P, 1.0)).xyz;
+            vec4(P, 1.0)).xyz;
         let decal_uv = local_position.xy * vec2(-0.5, 0.5) + 0.5;
 
         // if tiled or within tile
@@ -922,10 +927,9 @@ fn directional_light(
         }
     }
 
-color *= (*light).color.rgb * texture_sample;
+    var color = (*light).color.rgb * texture_sample;
 
 @if(ATMOSPHERE) {
-    let P = (*input).P;
     let atmosphere = view_bindings::atmosphere;
     let P_as = (
         view_bindings::atmosphere.world_to_atmosphere * vec4(P, 1.0)
@@ -933,7 +937,7 @@ color *= (*light).color.rgb * texture_sample;
     let P_clamped = clamp_to_surface(atmosphere, P_as);
     let r = length(P_clamped);
     let local_up = normalize(P_clamped);
-    let mu_light = dot(L, local_up);
+    let mu_light = dot((*light).direction_to_light.xyz, local_up);
 
     // Sample atmosphere
     let transmittance = sample_transmittance_lut(r, mu_light);

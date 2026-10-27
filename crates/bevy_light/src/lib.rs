@@ -46,7 +46,10 @@ mod volumetric;
 pub use volumetric::{FogVolume, VolumetricFog, VolumetricLight};
 pub mod cascade;
 use cascade::build_directional_light_cascades;
-pub use cascade::{CascadeShadowConfig, CascadeShadowConfigBuilder, Cascades};
+pub use cascade::{
+    CachedCascades, CascadeShadowConfig, CascadeShadowConfigBuilder, Cascades, Rebuild,
+    REBUILD_TILES,
+};
 mod point_light;
 pub use point_light::{
     update_point_light_frusta, PointLight, PointLightShadowMap, PointLightTexture,

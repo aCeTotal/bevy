@@ -13,6 +13,7 @@ use bevy_render::{
 use crate::{resources::GpuAtmosphere, ViewLightsUniformOffset};
 
 use super::{
+    refresh::AtmosphereRefresh,
     resources::{
         AtmosphereBindGroups, AtmosphereLutPipelines, AtmosphereTransformsOffset,
         RenderSkyPipelineId,
@@ -22,6 +23,7 @@ use super::{
 
 pub fn atmosphere_luts(
     view: ViewQuery<(
+        Option<&AtmosphereRefresh>,
         &GpuAtmosphereSettings,
         &AtmosphereBindGroups,
         &DynamicUniformIndex<GpuAtmosphere>,
@@ -35,6 +37,7 @@ pub fn atmosphere_luts(
     mut ctx: RenderContext,
 ) {
     let (
+        refresh,
         settings,
         bind_groups,
         atmosphere_uniforms_offset,
@@ -43,6 +46,10 @@ pub fn atmosphere_luts(
         view_uniforms_offset,
         lights_uniforms_offset,
     ) = view.into_inner();
+    let (planet, sky, aerial) = refresh.map_or((true, true, true), |r| (r.planet, r.sky, r.view));
+    if !planet && !sky && !aerial {
+        return;
+    }
 
     let (
         Some(transmittance_lut_pipeline),
@@ -77,70 +84,69 @@ pub fn atmosphere_luts(
         compute_pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
     }
 
-    // Transmittance LUT
+    // Transmittance and multiscattering only change with the planet.
+    if planet {
+        luts_pass.set_pipeline(transmittance_lut_pipeline);
+        luts_pass.set_bind_group(
+            0,
+            &bind_groups.transmittance_lut,
+            &[
+                atmosphere_uniforms_offset.index(),
+                settings_uniforms_offset.index(),
+            ],
+        );
 
-    luts_pass.set_pipeline(transmittance_lut_pipeline);
-    luts_pass.set_bind_group(
-        0,
-        &bind_groups.transmittance_lut,
-        &[
-            atmosphere_uniforms_offset.index(),
-            settings_uniforms_offset.index(),
-        ],
-    );
+        dispatch_2d(&mut luts_pass, settings.transmittance_lut_size);
 
-    dispatch_2d(&mut luts_pass, settings.transmittance_lut_size);
+        // Multiscattering LUT
 
-    // Multiscattering LUT
+        luts_pass.set_pipeline(multiscattering_lut_pipeline);
+        luts_pass.set_bind_group(
+            0,
+            &bind_groups.multiscattering_lut,
+            &[
+                atmosphere_uniforms_offset.index(),
+                settings_uniforms_offset.index(),
+            ],
+        );
 
-    luts_pass.set_pipeline(multiscattering_lut_pipeline);
-    luts_pass.set_bind_group(
-        0,
-        &bind_groups.multiscattering_lut,
-        &[
-            atmosphere_uniforms_offset.index(),
-            settings_uniforms_offset.index(),
-        ],
-    );
+        luts_pass.dispatch_workgroups(
+            settings.multiscattering_lut_size.x,
+            settings.multiscattering_lut_size.y,
+            1,
+        );
+    }
 
-    luts_pass.dispatch_workgroups(
-        settings.multiscattering_lut_size.x,
-        settings.multiscattering_lut_size.y,
-        1,
-    );
+    if sky {
+        luts_pass.set_pipeline(sky_view_lut_pipeline);
+        luts_pass.set_bind_group(
+            0,
+            &bind_groups.sky_view_lut,
+            &[
+                atmosphere_uniforms_offset.index(),
+                settings_uniforms_offset.index(),
+                atmosphere_transforms_offset.index(),
+                view_uniforms_offset.offset,
+                lights_uniforms_offset.offset,
+            ],
+        );
+        dispatch_2d(&mut luts_pass, settings.sky_view_lut_size);
+    }
 
-    // Sky View LUT
-
-    luts_pass.set_pipeline(sky_view_lut_pipeline);
-    luts_pass.set_bind_group(
-        0,
-        &bind_groups.sky_view_lut,
-        &[
-            atmosphere_uniforms_offset.index(),
-            settings_uniforms_offset.index(),
-            atmosphere_transforms_offset.index(),
-            view_uniforms_offset.offset,
-            lights_uniforms_offset.offset,
-        ],
-    );
-
-    dispatch_2d(&mut luts_pass, settings.sky_view_lut_size);
-
-    // Aerial View LUT
-
-    luts_pass.set_pipeline(aerial_view_lut_pipeline);
-    luts_pass.set_bind_group(
-        0,
-        &bind_groups.aerial_view_lut,
-        &[
-            atmosphere_uniforms_offset.index(),
-            settings_uniforms_offset.index(),
-            view_uniforms_offset.offset,
-            lights_uniforms_offset.offset,
-        ],
-    );
-
-    dispatch_2d(&mut luts_pass, settings.aerial_view_lut_size.xy());
+    if aerial {
+        luts_pass.set_pipeline(aerial_view_lut_pipeline);
+        luts_pass.set_bind_group(
+            0,
+            &bind_groups.aerial_view_lut,
+            &[
+                atmosphere_uniforms_offset.index(),
+                settings_uniforms_offset.index(),
+                view_uniforms_offset.offset,
+                lights_uniforms_offset.offset,
+            ],
+        );
+        dispatch_2d(&mut luts_pass, settings.aerial_view_lut_size.xy());
+    }
     pass_span.end(&mut luts_pass);
 }
 
