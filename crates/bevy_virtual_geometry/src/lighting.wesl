@@ -26,6 +26,9 @@ const CROWN_SHADE = vec2<f32>(0.35, 1.0);
 const CROWN_RISE = vec2<f32>(0.15, 1.3);
 /// Leaf brightness and warmth spread between plants.
 const LEAF_SPREAD = vec2<f32>(0.22, 0.14);
+/// Far crowns darken into canopy: range, light kept.
+const CANOPY_SEEN = vec2<f32>(600.0, 2500.0);
+const CANOPY_FAR: f32 = 0.7;
 /// Leaf turning: tilt, rate; leaves per metre.
 const LEAF_TURN = vec2<f32>(0.3, 3.0);
 const LEAF_CELLS: f32 = 4.0;
@@ -175,7 +178,9 @@ fn shade(@builtin(position) p: vec4<f32>) -> Shaded {
     look.diffuse_occlusion *= crown;
     look.specular_occlusion *= crown;
     if m.shading == FOLIAGE {
-        look.base_color = vec4(look.base_color.rgb * leaf_tint(s.owner), look.base_color.a);
+        // Lit leaves blur into a shaded canopy afar.
+        let far = smoothstep(CANOPY_SEEN.x, CANOPY_SEEN.y, distance(world, view.wind_eye));
+        look.base_color = vec4(look.base_color.rgb * leaf_tint(s.owner) * mix(1.0, CANOPY_FAR, far), look.base_color.a);
         look.normal = turned_leaves(look.normal, world, s.owner);
     }
     let color = lit(look, Spot(world, normal, p.xy));

@@ -74,6 +74,8 @@ pub use bevy_material as material;
 pub use bevy_math as math;
 #[cfg(feature = "bevy_mesh")]
 pub use bevy_mesh as mesh;
+#[cfg(feature = "bevy_ocean")]
+pub use bevy_ocean as ocean;
 #[cfg(feature = "bevy_pbr")]
 pub use bevy_pbr as pbr;
 #[cfg(feature = "bevy_picking")]
@@ -81,6 +83,8 @@ pub use bevy_picking as picking;
 pub use bevy_platform as platform;
 #[cfg(feature = "bevy_post_process")]
 pub use bevy_post_process as post_process;
+#[cfg(feature = "bevy_probe_gi")]
+pub use bevy_probe_gi as probe_gi;
 pub use bevy_ptr as ptr;
 pub use bevy_reflect as reflect;
 #[cfg(feature = "bevy_remote")]
@@ -96,12 +100,6 @@ pub use bevy_shader as shader;
 pub use bevy_shape as shape;
 #[cfg(feature = "bevy_solari")]
 pub use bevy_solari as solari;
-#[cfg(feature = "bevy_probe_gi")]
-pub use bevy_probe_gi as probe_gi;
-#[cfg(feature = "bevy_ocean")]
-pub use bevy_ocean as ocean;
-#[cfg(feature = "bevy_virtual_geometry")]
-pub use bevy_virtual_geometry as virtual_geometry;
 #[cfg(feature = "bevy_sprite")]
 pub use bevy_sprite as sprite;
 #[cfg(feature = "bevy_sprite_render")]
@@ -120,6 +118,8 @@ pub use bevy_ui_render as ui_render;
 #[cfg(feature = "bevy_ui_widgets")]
 pub use bevy_ui_widgets as ui_widgets;
 pub use bevy_utils as utils;
+#[cfg(feature = "bevy_virtual_geometry")]
+pub use bevy_virtual_geometry as virtual_geometry;
 #[cfg(feature = "bevy_window")]
 pub use bevy_window as window;
 #[cfg(feature = "bevy_winit")]

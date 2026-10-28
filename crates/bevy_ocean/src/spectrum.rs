@@ -108,7 +108,8 @@ fn energy(sea: &Sea, band: &Band, k: Vec2) -> f32 {
     }
     let w = (GRAVITY * len).sqrt();
     let dk = TAU / band.size;
-    let sea_state = jonswap(sea, w) * spreading(sea, w, off(k, WIND_BEARING)) + swell(w, off(k, SWELL.2));
+    let sea_state =
+        jonswap(sea, w) * spreading(sea, w, off(k, WIND_BEARING)) + swell(w, off(k, SWELL.2));
     sea_state * GRAVITY / (2.0 * w) / len * dk * dk
 }
 

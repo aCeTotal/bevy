@@ -130,7 +130,11 @@ mod tests {
     fn tiles_land_where_the_whole_box_does() {
         let size = 2048;
         let side = (size / REBUILD_TILES) as f32;
-        for p in [Vec2::new(-0.7, 0.6), Vec2::new(0.3, -0.2), Vec2::new(0.9, 0.95)] {
+        for p in [
+            Vec2::new(-0.7, 0.6),
+            Vec2::new(0.3, -0.2),
+            Vec2::new(0.9, 0.95),
+        ] {
             let whole = pixel(tile_projection(None, size), p);
             let cell = (whole / side).floor();
             let tile = cell.y as u32 * REBUILD_TILES + cell.x as u32;
