@@ -899,6 +899,16 @@ fn directional_light(
     return color * directional_light_radiance(light_id, (*input).P);
 }
 
+/// Pixels a light texture tile spans before it blurs into its mean.
+const TILE_SEEN = vec2<f32>(150.0, 600.0);
+
+/// Ground one pixel covers at `P`, metres.
+fn pixel_footprint(P: vec3<f32>) -> f32 {
+    let view = &view_bindings::view;
+    let pixel = 2.0 / ((*view).clip_from_view[1][1] * (*view).viewport.w);
+    return select(distance(P, (*view).world_position) * pixel, pixel, (*view).clip_from_view[3][3] == 1.0);
+}
+
 /// Light arriving at `P`: color, light texture and atmosphere.
 fn directional_light_radiance(light_id: u32, P: vec3<f32>) -> vec3<f32> {
     let light = &view_bindings::lights.directional_lights[light_id];
@@ -906,15 +916,13 @@ fn directional_light_radiance(light_id: u32, P: vec3<f32>) -> vec3<f32> {
 
 @if(LIGHT_TEXTURES)
     if (*light).decal_index != 0xFFFFFFFFu {
-        let local_position = (view_bindings::clustered_decals.decals[(*light).decal_index].local_from_world *
-            vec4(P, 1.0)).xyz;
+        let decal = &view_bindings::clustered_decals.decals[(*light).decal_index];
+        let local_position = ((*decal).local_from_world * vec4(P, 1.0)).xyz;
         let decal_uv = local_position.xy * vec2(-0.5, 0.5) + 0.5;
+        let tiled = (*decal).tag != 0u;
 
-        // if tiled or within tile
-        if (view_bindings::clustered_decals.decals[(*light).decal_index].tag != 0u)
-                || all(clamp(decal_uv, vec2(0.0), vec2(1.0)) == decal_uv)
-        {
-            let image_index = view_bindings::clustered_decals.decals[(*light).decal_index].base_color_texture_index;
+        if tiled || all(clamp(decal_uv, vec2(0.0), vec2(1.0)) == decal_uv) {
+            let image_index = (*decal).base_color_texture_index;
 
             texture_sample = textureSampleLevel(
                 view_bindings::clustered_decal_textures[image_index],
@@ -922,6 +930,16 @@ fn directional_light_radiance(light_id: u32, P: vec3<f32>) -> vec3<f32> {
                 decal_uv - floor(decal_uv),
                 0.0
             ).r;
+            if tiled {
+                let mean = textureSampleLevel(
+                    view_bindings::clustered_decal_textures[image_index],
+                    view_bindings::clustered_decal_sampler,
+                    vec2(0.5),
+                    f32(textureNumLevels(view_bindings::clustered_decal_textures[image_index]))
+                ).r;
+                let tile = 2.0 / length((*decal).local_from_world[0].xyz);
+                texture_sample = mix(mean, texture_sample, smoothstep(TILE_SEEN.x, TILE_SEEN.y, tile / pixel_footprint(P)));
+            }
         } else {
             texture_sample = 0f;
         }
