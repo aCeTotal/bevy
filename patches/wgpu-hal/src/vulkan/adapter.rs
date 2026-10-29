@@ -505,14 +505,14 @@ impl PhysicalDeviceFeatures {
             shader_atomic_int64: if device_api_version >= vk::API_VERSION_1_2
                 || enabled_extensions.contains(&khr::shader_atomic_int64::NAME)
             {
-                let needed = requested_features.intersects(
-                    wgt::Features::SHADER_INT64_ATOMIC_ALL_OPS
-                        | wgt::Features::SHADER_INT64_ATOMIC_MIN_MAX,
-                );
+                let all_ops =
+                    requested_features.contains(wgt::Features::SHADER_INT64_ATOMIC_ALL_OPS);
+                let min_max =
+                    requested_features.contains(wgt::Features::SHADER_INT64_ATOMIC_MIN_MAX);
                 Some(
                     vk::PhysicalDeviceShaderAtomicInt64Features::default()
-                        .shader_buffer_int64_atomics(needed)
-                        .shader_shared_int64_atomics(needed),
+                        .shader_buffer_int64_atomics(all_ops || min_max)
+                        .shader_shared_int64_atomics(all_ops),
                 )
             } else {
                 None
@@ -773,11 +773,11 @@ impl PhysicalDeviceFeatures {
         features.set(F::PRIMITIVE_INDEX, self.core.geometry_shader != 0);
 
         if let Some(ref shader_atomic_int64) = self.shader_atomic_int64 {
-            features.set(
-                F::SHADER_INT64_ATOMIC_ALL_OPS | F::SHADER_INT64_ATOMIC_MIN_MAX,
-                shader_atomic_int64.shader_buffer_int64_atomics != 0
-                    && shader_atomic_int64.shader_shared_int64_atomics != 0,
-            );
+            // Min/max only touch storage buffers.
+            let buffer = shader_atomic_int64.shader_buffer_int64_atomics != 0;
+            let shared = shader_atomic_int64.shader_shared_int64_atomics != 0;
+            features.set(F::SHADER_INT64_ATOMIC_MIN_MAX, buffer);
+            features.set(F::SHADER_INT64_ATOMIC_ALL_OPS, buffer && shared);
         }
 
         if let Some(ref shader_image_atomic_int64) = self.shader_image_atomic_int64 {
